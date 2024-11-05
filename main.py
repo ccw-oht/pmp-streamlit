@@ -17,70 +17,123 @@ def extract_video_id(url):
     else:
         raise ValueError("Invalid YouTube URL")
 
+def detect_transcript_format(transcript_text: str) -> str:
+    """Detect the format of the transcript based on its content."""
+    lines = transcript_text.strip().split('\n')
+    
+    # Check first few non-empty lines for format detection
+    for line in lines[:10]:
+        if not line.strip():
+            continue
+            
+        # Adobe format with line numbers and speakers (format: "1| 00;01;21;11 - 00;01;51;00")
+        if re.match(r'^\d+\|\s*\d{2};\d{2};\d{2};\d{2}\s*-\s*\d{2};\d{2};\d{2};\d{2}', line):
+            return "adobe_numbered"
+            
+        # Adobe format with speakers (format: "00;01;21;11 - 00;01;51;00")
+        if re.match(r'^\d{2};\d{2};\d{2};\d{2}\s*-\s*\d{2};\d{2};\d{2};\d{2}', line):
+            return "adobe"
+            
+        # YouTube format (format: "1:15:16" or simple line number + text)
+        if re.match(r'^\d+\|\s*$', line) or re.match(r'^\d{1,2}:\d{2}:\d{2}$', line):
+            return "youtube"
+    
+    return "unknown"
+
+def normalize_timestamp(timestamp: str) -> str:
+    """Normalize timestamp to HH:MM:SS format."""
+    # Handle empty or invalid timestamps
+    if not timestamp:
+        return "00:00:00"
+    
+    # Remove frame numbers if present (after last semicolon)
+    if ';' in timestamp:
+        parts = timestamp.split(';')[:3]  # Take only HH;MM;SS
+        timestamp = ':'.join(parts)
+    
+    # Split into parts
+    parts = timestamp.split(':')
+    
+    try:
+        if len(parts) == 1:  # SS
+            return f'00:00:{int(parts[0]):02d}'
+        elif len(parts) == 2:  # MM:SS
+            return f'00:{int(parts[0]):02d}:{int(parts[1]):02d}'
+        elif len(parts) == 3:  # HH:MM:SS
+            return f'{int(parts[0]):02d}:{int(parts[1]):02d}:{int(parts[2]):02d}'
+    except ValueError:
+        return "00:00:00"
+    
+    return timestamp
+
+def extract_transcript_entries(transcript: str) -> list:
+    """Extract transcript entries based on content format."""
+    entries = []
+    lines = transcript.strip().split('\n')
+    current_entry = None
+    
+    # Try to detect if this is an Adobe format transcript
+    is_adobe = any(';' in line for line in lines[:10])
+    
+    if is_adobe:
+        # Adobe format parsing
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Match timestamp range pattern
+            timestamp_match = re.match(r'(\d{2};\d{2};\d{2};\d{2})\s*-\s*\d{2};\d{2};\d{2};\d{2}', line)
+            if timestamp_match:
+                if current_entry and 'text' in current_entry:
+                    entries.append(current_entry)
+                current_entry = {'timestamp': normalize_timestamp(timestamp_match.group(1))}
+            elif line.startswith('Speaker '):
+                if current_entry:
+                    current_entry['speaker'] = line.strip()
+            elif current_entry:
+                if 'text' not in current_entry:
+                    current_entry['text'] = line
+                else:
+                    current_entry['text'] += ' ' + line
+    else:
+        # YouTube format parsing
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Match timestamp pattern (1:23 or 1:23:45)
+            timestamp_match = re.match(r'^(\d+:?\d{2}(:\d{2})?)\s*$', line)
+            if timestamp_match:
+                if current_entry and 'text' in current_entry:
+                    entries.append(current_entry)
+                current_entry = {'timestamp': normalize_timestamp(timestamp_match.group(1)), 'text': ''}
+            elif current_entry:
+                text = line.strip()
+                if text:
+                    current_entry['text'] = text
+    
+    # Add the last entry if it exists
+    if current_entry and 'text' in current_entry:
+        entries.append(current_entry)
+    
+    return entries
+
 def parse_transcript(file_path):
+    """Parse transcript file and save as JSON."""
     with open(file_path, "r") as f:
         raw_transcript = f.read()
-        print(raw_transcript)
-        
-    def normalize_timestamp(timestamp: str) -> str:
-        """Normalize timestamp to HH:MM:SS format."""
-        parts = timestamp.split(':')
-        if len(parts) == 2:  # MM:SS format
-            return f'00:{parts[0]:0>2}:{parts[1]:0>2}'  # Add leading zeros for HH
-        elif len(parts) == 3:  # HH:MM:SS format
-            return f'{parts[0]:0>2}:{parts[1]:0>2}:{parts[2]:0>2}'  # Ensure all parts have leading zeros
-        return timestamp  # Return as is if it doesn't match expected formats
-
-    def extract_transcript_entries(transcript):
-        entries = []
-        lines = transcript.split('\n')
-        for i in range(len(lines)):
-            #print(f"Processing line: {line}")  # Debugging: Print each line being processed
-
-            if re.match(r'^\d+;.*$', lines[i]):
-                timestamp = lines[i].split(' - ')[0]
-                speaker = next((lines[j] for j in range(i+1, len(lines)) if lines[j].strip() and not re.match(r'^\d+;.*$', lines[j])), None)
-                text = next((lines[j] for j in range(i+2, len(lines)) if lines[j].strip() and not re.match(r'^\d+;.*$', lines[j])), None)
-                entry = {'timestamp': timestamp, 'speaker': speaker, 'text': text}
-                entries.append(entry)
-            else:
-                for line in lines:
-                    #print(f"Processing line (YouTube): {line}")  # Debugging: Print each line being processed
-                    # Assuming the timestamp is at the start of the line and is in the format "MM:SS" or "HH:MM:SS"
-                    timestamp = lines[i].strip()
-                    match = re.match(r'(\d{1,2}:\d{2}(:\d{2})?)\s*(.*)', line)
-                    if match:
-                        timestamp = normalize_timestamp(match.group(1))  # Normalize the timestamp
-                        text = match.group(3).strip()  # Get the text after the timestamp
-                    if text:  # Only add non-empty entries
-                        entry = {'timestamp': timestamp, 'text': text}
-                        entries.append(entry)
-                
-        return entries
-
-    transcript_entries = extract_transcript_entries(raw_transcript)
-
-    # New code to combine contiguous entries by the same speaker
-    if transcript_entries:
-        combined_entries = []
-        for entry in transcript_entries:
-            # Check if 'speaker' key exists before accessing it
-            if 'speaker' in entry:
-                if combined_entries and combined_entries[-1].get('speaker') == entry['speaker']:
-                    combined_entries[-1]['text'] += ' ' + entry['text']  # Combine text
-                else:
-                    combined_entries.append(entry)  # Add new entry
-            else:
-                combined_entries.append(entry)  # Add entry if 'speaker' key does not exist
-        # Adjust timestamps
-        for entry in combined_entries:
-            entry['timestamp'] = entry['timestamp'].replace(';', ':')[:-3]
-            
-        transcript_path = os.path.join(output_dir, f"{video_id}_parsed_transcript.json")
-        # Save to JSON
-        with open(transcript_path, 'w') as f:
-            json.dump(combined_entries, f)
     
+    transcript_entries = extract_transcript_entries(raw_transcript)
+    
+    # Save to JSON in the same directory as the transcript file
+    transcript_path = "parsed_transcript.json"  # Use fixed path as in original code
+    with open(transcript_path, 'w') as f:
+        json.dump(transcript_entries, f, indent=4)
+    
+    return transcript_entries
+
 if __name__ == "__main__":
 
     base_url = st.text_input(
@@ -92,9 +145,7 @@ if __name__ == "__main__":
         video_id = extract_video_id(base_url)
         output_dir = os.path.join(".", f"yt_video_{video_id}")
         os.makedirs(output_dir, exist_ok=True)
-        #st.write(output_dir)
-        #base_url)
-        #yt_embed = st.video_embed(video_id)
+        
         with elements("media_player"):
             from streamlit_elements import media
             media.Player(url=base_url, controls=True)
@@ -103,30 +154,39 @@ if __name__ == "__main__":
         "Raw Transcript",
         value=""
     )
+    
     if transcript:
-        with open(f"{output_dir}/{video_id}_raw_transcript.txt", 'w') as f:
+        # Save raw transcript
+        transcript_file = f"{output_dir}/{video_id}_raw_transcript.txt"
+        with open(transcript_file, 'w') as f:
             f.write(transcript)
-        #st.write(transcript)
         
-        parse_transcript(f"{output_dir}/{video_id}_raw_transcript.txt")
+        # Parse and get entries
+        entries = parse_transcript(transcript_file)
         
-        
-        #st.write(f"{output_dir}/{video_id}_parsed_transcript.json")
-        st.header("Parsed Transcript") 
-        with open(f"{output_dir}/{video_id}_parsed_transcript.json", "r") as f:
-            data = json.load(f)
-            df = pd.json_normalize(data=data)
-            edited_df = st.data_editor(
-                df,
-                column_config={
-                    "timestamp": st.column_config.TextColumn(
-                        "Timestamp",
-                        validate=r'(\d{2}:\d{2}:\d{2})'
-                    ),
-                    "text": st.column_config.TextColumn(
-                        "Text",
-                        help="Text from combined speakers.",
-                        disabled=True,                    
-                    ),
-                }
-            )
+        # Display parsed transcript
+        st.header("Parsed Transcript")
+        if entries:  # Only create dataframe if we have entries
+            df = pd.json_normalize(entries)
+            if not df.empty:  # Check if dataframe has data
+                edited_df = st.data_editor(
+                    df,
+                    column_config={
+                        "timestamp": st.column_config.TextColumn(
+                            "Timestamp",
+                            validate=r'(\d{2}:\d{2}:\d{2})'
+                        ),
+                        "text": st.column_config.TextColumn(
+                            "Text",
+                            help="Text from combined speakers.",
+                            disabled=True,                    
+                        ),
+                        "speaker": st.column_config.TextColumn(
+                            "Speaker",
+                            help="Speaker name if available",
+                            disabled=True,
+                        ) if "speaker" in df.columns else None,
+                    }
+                )
+        else:
+            st.warning("No entries were parsed from the transcript.")
